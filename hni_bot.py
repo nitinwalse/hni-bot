@@ -1,10 +1,15 @@
 # =====================================================================
-#  WEEKLY HNI BOT  —  hni_bot.py   (V1.1)
+#  WEEKLY HNI BOT  —  hni_bot.py   (V1.2)
 #  NIFTY 1:3:2 Call Ratio | सतत setup तपासणी | दुसरी expiry
 #  Exit: Net TP 1% / Net SL 1% / expiry च्या 4 दिवस आधी 15:15
 # =====================================================================
+import base64
+import hashlib
+import hmac
 import json
 import logging
+import re
+import struct
 import math
 import os
 import sys
@@ -59,6 +64,46 @@ def r05(x):
 def inr(x):
     s = "-" if x < 0 else ""
     return f"{s}₹{abs(x):,.0f}"
+
+
+# ---------------------------------------------------------------------
+#  [V1.2] TOTP ने रोज नवीन Dhan token (जुन्या icbot ची पद्धत)
+# ---------------------------------------------------------------------
+def totp_now(secret, step=30, digits=6):
+    key = base64.b32decode(secret + "=" * (-len(secret) % 8), casefold=True)
+    msg = struct.pack(">Q", int(time.time()) // step)
+    h = hmac.new(key, msg, hashlib.sha1).digest()
+    o = h[-1] & 0x0F
+    code = (struct.unpack(">I", h[o:o + 4])[0] & 0x7FFFFFFF) % (10 ** digits)
+    return str(code).zfill(digits)
+
+def generate_token():
+    """PIN + TOTP ने Dhan कडून नवीन token. परत token किंवा None."""
+    if not (C.DHAN_PIN and C.DHAN_TOTP_SECRET):
+        return None, "PIN/TOTP .env मध्ये नाही"
+    try:
+        r = requests.post("https://auth.dhan.co/app/generateAccessToken",
+                          params={"dhanClientId": str(C.DHAN_CLIENT_ID), "pin": C.DHAN_PIN,
+                                  "totp": totp_now(C.DHAN_TOTP_SECRET)}, timeout=20)
+        j = r.json() if r.text else {}
+        d = j.get("data") if isinstance(j.get("data"), dict) else {}
+        tok = j.get("accessToken") or j.get("access_token") or d.get("accessToken")
+        if not tok:
+            return None, str(j)[:200]
+        return tok, j.get("expiryTime", "")
+    except Exception as e:
+        return None, str(e)
+
+def save_token_env(tok):
+    p = os.path.join(HERE, ".env")
+    txt = open(p, encoding="utf-8").read() if os.path.exists(p) else ""
+    if re.search(r"^DHAN_ACCESS_TOKEN=.*$", txt, flags=re.M):
+        txt = re.sub(r"^DHAN_ACCESS_TOKEN=.*$", "DHAN_ACCESS_TOKEN=" + tok, txt, count=1, flags=re.M)
+    else:
+        txt += "\nDHAN_ACCESS_TOKEN=" + tok + "\n"
+    with open(p, "w", encoding="utf-8") as f:
+        f.write(txt)
+    os.chmod(p, 0o600)
 
 
 # ---------------------------------------------------------------------
@@ -121,6 +166,10 @@ class Dhan:
                   "Accept": "application/json"}
         self._last_oc = 0.0
         self._last_q = 0.0
+
+    def set_token(self, tok):
+        C.DHAN_ACCESS_TOKEN = tok
+        self.h["access-token"] = tok
 
     def _req(self, method, path, body=None):
         r = requests.request(method, BASE + path, headers=self.h,
@@ -337,6 +386,28 @@ class Bot:
         self.last_mon = 0.0
         self.last_status = time.time()
         self.n_orders = 0
+        self.token_day = None
+        self.last_refresh_try = 0.0
+
+    # ---------- [V1.2] token ----------
+    def refresh_token(self, reason):
+        if time.time() - self.last_refresh_try < 120:
+            return False
+        self.last_refresh_try = time.time()
+        tok, info = generate_token()
+        if tok:
+            self.d.set_token(tok)
+            save_token_env(tok)
+            self.token_day = now().date().isoformat()
+            self.tg.send(f"🔑 नवीन Dhan token तयार ({reason}) | मुदत: {info or '२४ तास'}")
+            return True
+        self.tg.send_throttled("tokfail", f"❌ Token बनला नाही ({reason}): {info}", 900)
+        return False
+
+    def token_check(self, t):
+        if (is_trading_day(t.date()) and t.time() >= hm(C.TOKEN_REFRESH_TIME)
+                and self.token_day != t.date().isoformat()):
+            self.refresh_token("रोजचा")
 
     # ---------- expiry ----------
     def target_expiry(self, today):
@@ -727,6 +798,7 @@ class Bot:
             try:
                 self.commands()
                 t = now()
+                self.token_check(t)
                 if market_open(t):
                     if self.s["status"] == "OPEN":
                         if time.time() - self.last_mon >= C.MONITOR_EVERY_SEC:
@@ -740,6 +812,8 @@ class Bot:
                     time.sleep(15)
             except DhanError as e:
                 log.error("Dhan: %s", e)
+                if "401" in str(e) and self.refresh_token("401"):
+                    continue
                 self.tg.send_throttled("dhan", f"⚠️ Dhan error: {e}", 600)
                 time.sleep(10)
             except Exception as e:

@@ -20,13 +20,16 @@ def _load_env(path=".env"):
 
 _load_env()
 
-VERSION = "V1.1"
+VERSION = "V1.2"
 
 # ---------- Keys (.env मधून) ----------
 DHAN_CLIENT_ID    = os.getenv("DHAN_CLIENT_ID", "")
 DHAN_ACCESS_TOKEN = os.getenv("DHAN_ACCESS_TOKEN", "")
 TG_BOT_TOKEN      = os.getenv("TG_BOT_TOKEN", "")
 TG_CHAT_ID        = os.getenv("TG_CHAT_ID", "")
+DHAN_PIN          = os.getenv("DHAN_PIN", "")            # [V1.2] रोज token आपोआप
+DHAN_TOTP_SECRET  = os.getenv("DHAN_TOTP_SECRET", "").replace(" ", "").upper()
+TOKEN_REFRESH_TIME = "08:45"                              # [V1.2] trading दिवशी नवीन token
 
 # ---------- Mode ----------
 LIVE = True                 # True = खरे orders. False = फक्त गणित + Telegram (order नाही)
@@ -54,9 +57,9 @@ DEBIT_MAX_PCT  = 0.2        # debit  <= 0.2%
 
 # ---------- Target / SL (NET, margin वर %) ----------
 TP_NET_PCT   = 1.0          # net target %
-SL_MODE      = "SYMMETRIC"  # [V1.1] SYMMETRIC = target जेवढ्या MTM अंतरावर तेवढ्याच अंतरावर SL
+SL_MODE      = "NET_PCT"    # [V1.1] SYMMETRIC = target जेवढ्या MTM अंतरावर तेवढ्याच अंतरावर SL
                             #        NET_PCT   = खाली SL_NET_PCT प्रमाणे net SL
-SL_NET_PCT   = 1.5          # फक्त SL_MODE = "NET_PCT" असेल तेव्हा
+SL_NET_PCT   = 2.0          # फक्त SL_MODE = "NET_PCT" असेल तेव्हा
 SLIPPAGE_RS  = 0.5          # exit वेळी प्रत्येक unit वर ₹0.5 घसरण गृहीत
 
 # ---------- वेळा (IST) ----------
