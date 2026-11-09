@@ -1,0 +1,15 @@
+[Unit]
+Description=Weekly HNI Bot (NIFTY 1:3:2)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=ubuntu
+WorkingDirectory=/home/ubuntu/hni_bot
+ExecStart=/home/ubuntu/hni_bot/venv/bin/python /home/ubuntu/hni_bot/hni_bot.py
+Restart=always
+RestartSec=10
+Environment=PYTHONUNBUFFERED=1
+
+[Install]
+WantedBy=multi-user.target
