@@ -1,5 +1,5 @@
 # =====================================================================
-#  WEEKLY HNI BOT  —  hni_bot.py   (V1.3)
+#  WEEKLY HNI BOT  —  hni_bot.py   (V1.4)
 #  NIFTY 1:3:2 Call Ratio | सतत setup तपासणी | दुसरी expiry
 #  Exit: Net TP 1% / Net SL 1% / expiry च्या 4 दिवस आधी 15:15
 # =====================================================================
@@ -380,6 +380,19 @@ def save_state(s):
     os.replace(tmp, p)
 
 
+HELP_TEXT = (
+    "📋 Commands:\n"
+    "/status — सध्याची स्थिती (trade, MTM, TP/SL)\n"
+    "/settings — सर्व settings\n"
+    "/preview — आत्ता setup कसा बसतो ते (order नाही)\n"
+    "/sets — सध्याचे sets पाहा\n"
+    "/sets 7 — sets बदला (उदा. 7)\n"
+    "/pause — नवीन entry बंद (चालू trade चालू राहतो)\n"
+    "/resume — नवीन entry पुन्हा सुरू\n"
+    "/exitnow — चालू trade लगेच बंद\n"
+    "/help — ही यादी")
+
+
 # ---------------------------------------------------------------------
 #  Bot
 # ---------------------------------------------------------------------
@@ -392,7 +405,7 @@ class Bot:
         self.last_mon = 0.0
         self.last_status = time.time()
         self.n_orders = 0
-        self.token_day = None
+        self.token_day = self.s.get("token_day")   # [V1.4] restart नंतरही लक्षात
         self.last_refresh_try = 0.0
         self.spot_seen = {}          # [V1.3] {date: (पहिला spot, वेळ, बदलला?)}
         self.entry_block_until = 0.0
@@ -407,6 +420,8 @@ class Bot:
             self.d.set_token(tok)
             save_token_env(tok)
             self.token_day = now().date().isoformat()
+            self.s["token_day"] = self.token_day
+            save_state(self.s)
             self.tg.send(f"🔑 नवीन Dhan token तयार ({reason}) | मुदत: {info or '२४ तास'}")
             return True
         self.tg.send_throttled("tokfail", f"❌ Token बनला नाही ({reason}): {info}", 900)
@@ -415,6 +430,17 @@ class Bot:
     def token_check(self, t):
         if (is_trading_day(t.date()) and t.time() >= hm(C.TOKEN_REFRESH_TIME)
                 and self.token_day != t.date().isoformat()):
+            # [V1.4] आजचा token आधीच चालत असेल (restart) तर नवीन बनवू नका — Dhan "Invalid TOTP" देतो
+            if self.token_day is None or self.token_day == "":
+                try:
+                    self.d.funds()
+                    self.token_day = t.date().isoformat()
+                    self.s["token_day"] = self.token_day
+                    save_state(self.s)
+                    log.info("सध्याचा token चालतो — नवीन बनवला नाही")
+                    return
+                except Exception:
+                    pass
             self.refresh_token("रोजचा")
 
     # ---------- expiry ----------
@@ -868,8 +894,28 @@ class Bot:
                     self.tg.send(f"✅ Sets = {c[1]} (1:3:2 × {c[1]}). पुढच्या setup पासून लागू.")
                 else:
                     self.tg.send(f"सध्याचे sets: {self.s.get('sets') or 'ठरलेले नाहीत'}. बदलायला: /sets 20")
-            elif c[0] == "/help":
-                self.tg.send("/status /preview /sets N /pause /resume /exitnow")
+            elif c[0] == "/settings":
+                self.tg.send(self.settings_text())
+            elif c[0] in ("/help", "/start", "/commands"):
+                self.tg.send(HELP_TEXT)
+            else:
+                self.tg.send("❓ ही command माहीत नाही.\n" + HELP_TEXT)
+
+    def settings_text(self):
+        if C.TARGET_MODE == "GROSS":
+            tpsl = f"TP/SL: GROSS MTM +{C.TP_GROSS_PCT}% / −{C.SL_GROSS_PCT}% (margin वर)"
+        else:
+            tpsl = f"TP/SL: NET +{C.TP_NET_PCT}% / SL {C.SL_MODE} {C.SL_NET_PCT}%"
+        return (f"⚙️ Settings — HNI Bot {C.VERSION}\n"
+                f"Mode: {'LIVE' if C.LIVE else 'DRY'} | paused={self.s.get('paused')}\n"
+                f"Sets: {self.s.get('sets') or 'ठरलेले नाहीत'} (1:3:2) | Lot {C.LOT_SIZE} | Freeze {C.FREEZE_QTY}\n"
+                f"Strikes: L1 {C.L1_MIN_OTM}–{C.L1_MAX_OTM} OTM, अंतर {list(C.GAP1_LIST)}\n"
+                f"Filter: Credit ≤{C.CREDIT_MAX_PCT}% / Debit ≤{C.DEBIT_MAX_PCT}%\n"
+                f"{tpsl} | Slippage गृहीत ₹{C.SLIPPAGE_RS}/unit\n"
+                f"Entry: {C.SCAN_START}–{C.SCAN_END}, दर {C.SCAN_EVERY_SEC} सेकंद | Expiry: दुसरी\n"
+                f"Exit: expiry च्या {C.EXIT_DAYS_BEFORE_EXPIRY} दिवस आधी {C.EXIT_TIME}\n"
+                f"Re-entry: exit नंतर {C.REENTRY_GAP_SEC} सेकंद | फसल्यास {C.ENTRY_FAIL_COOLDOWN_MIN} मिनिटे थांबणे\n"
+                f"Token: रोज {C.TOKEN_REFRESH_TIME} (आज: {self.token_day or '—'})")
 
     # ---------- main loop ----------
     def run(self):

@@ -20,7 +20,7 @@ def _load_env(path=".env"):
 
 _load_env()
 
-VERSION = "V1.3"
+VERSION = "V1.4"
 
 # ---------- Keys (.env मधून) ----------
 DHAN_CLIENT_ID    = os.getenv("DHAN_CLIENT_ID", "")
