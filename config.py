@@ -20,7 +20,7 @@ def _load_env(path=".env"):
 
 _load_env()
 
-VERSION = "V1.2"
+VERSION = "V1.3"
 
 # ---------- Keys (.env मधून) ----------
 DHAN_CLIENT_ID    = os.getenv("DHAN_CLIENT_ID", "")
@@ -55,7 +55,13 @@ GAP1_LIST   = (100, 200, 300)   # L1 -> L2 अंतर
 CREDIT_MAX_PCT = 0.6        # credit <= 0.6% (margin वर)
 DEBIT_MAX_PCT  = 0.2        # debit  <= 0.2%
 
-# ---------- Target / SL (NET, margin वर %) ----------
+# ---------- [V1.3] Target / SL पद्धत ----------
+TARGET_MODE  = "GROSS"      # GROSS = MTM (खर्च/slippage न वजा करता) वर TP/SL — सध्या slippage मोजण्यासाठी
+                            # NET   = खाली TP_NET_PCT / SL_MODE प्रमाणे (खर्च वजा करून)
+TP_GROSS_PCT = 1.1          # MTM +1.1% (margin वर) झाले की exit
+SL_GROSS_PCT = 1.1          # MTM −1.1% झाले की exit
+
+# ---------- Target / SL (NET, margin वर %) — TARGET_MODE = "NET" असेल तेव्हाच ----------
 TP_NET_PCT   = 1.0          # net target %
 SL_MODE      = "NET_PCT"    # [V1.1] SYMMETRIC = target जेवढ्या MTM अंतरावर तेवढ्याच अंतरावर SL
                             #        NET_PCT   = खाली SL_NET_PCT प्रमाणे net SL
@@ -74,6 +80,8 @@ STATUS_EVERY_MIN  = 60      # Telegram status किती मिनिटां
 ONE_TRADE_PER_EXPIRY = False  # [V1.1] एका expiry मध्ये अनेक trades चालतील
 NO_REENTRY_SAME_DAY  = False  # [V1.1] exit च्या दिवशीही नवीन trade चालेल
 REENTRY_GAP_SEC      = 60     # [V1.1] exit नंतर किमान 1 मिनिट थांबून नवीन setup
+ENTRY_FAIL_COOLDOWN_MIN = 15  # [V1.3] entry फसली तर इतकी मिनिटे नवीन प्रयत्न नाही
+LIVE_CHECK_MIN_SEC   = 120    # [V1.3] spot किमान 2 मिनिटांत बदलला तरच market चालू समजायचे
 
 # ---------- Order chase ----------
 CHASE_TRIES    = 6          # limit order किती वेळा नव्या bid/ask वर
@@ -90,6 +98,7 @@ GST_RATE   = 0.18
 
 # ---------- NSE सुट्ट्या (YYYY-MM-DD) — NSE च्या यादीतून भरा ----------
 NSE_HOLIDAYS = {
+    "2026-11-10",
     "2026-11-24",
     # "2026-12-25",
 }

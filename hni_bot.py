@@ -1,5 +1,5 @@
 # =====================================================================
-#  WEEKLY HNI BOT  —  hni_bot.py   (V1.2)
+#  WEEKLY HNI BOT  —  hni_bot.py   (V1.3)
 #  NIFTY 1:3:2 Call Ratio | सतत setup तपासणी | दुसरी expiry
 #  Exit: Net TP 1% / Net SL 1% / expiry च्या 4 दिवस आधी 15:15
 # =====================================================================
@@ -253,6 +253,12 @@ class Dhan:
             log.warning("margin API fail: %s", e)
         return None
 
+    def positions(self):
+        js = self._req("GET", "/positions")
+        if isinstance(js, dict):
+            js = js.get("data", [])
+        return js or []
+
     def funds(self):
         js = self._req("GET", "/fundlimit")
         avail = js.get("availabelBalance", js.get("availableBalance", 0))
@@ -388,6 +394,8 @@ class Bot:
         self.n_orders = 0
         self.token_day = None
         self.last_refresh_try = 0.0
+        self.spot_seen = {}          # [V1.3] {date: (पहिला spot, वेळ, बदलला?)}
+        self.entry_block_until = 0.0
 
     # ---------- [V1.2] token ----------
     def refresh_token(self, reason):
@@ -500,6 +508,23 @@ class Bot:
             log.warning("fundlimit: %s", e)
         return max(sets, 0)
 
+    # ---------- [V1.3] market खरंच चालू आहे का ----------
+    def market_live(self, spot):
+        """सुट्टीच्या दिवशी spot बदलत नाही. आज spot बदलल्याचे दिसले तरच True."""
+        d = now().date().isoformat()
+        rec = self.spot_seen.get(d)
+        if rec is None:
+            self.spot_seen = {d: [spot, time.time(), False]}
+            return False
+        if rec[2]:
+            return True
+        if abs(spot - rec[0]) >= 0.05:
+            rec[2] = True
+            return True
+        if time.time() - rec[1] >= C.LIVE_CHECK_MIN_SEC * 5:
+            self.tg.send_throttled("mktclosed", f"🔕 Spot {spot} बदलत नाही — market बंद/सुट्टी समजतो, entry नाही", 3600)
+        return False
+
     # ---------- scan / entry ----------
     def can_enter(self, t, expiry):
         if self.s.get("paused"):
@@ -508,6 +533,8 @@ class Bot:
             return False, "scan वेळ नाही"
         if C.NO_REENTRY_SAME_DAY and self.s.get("last_exit_day") == t.date().isoformat():
             return False, "आज exit झाले"
+        if time.time() < self.entry_block_until:
+            return False, "entry फसल्यानंतर थांबणे"
         if time.time() - float(self.s.get("last_exit_ts") or 0) < C.REENTRY_GAP_SEC:
             return False, "exit नंतर 1 मिनिट थांबणे"
         if C.ONE_TRADE_PER_EXPIRY and self.s.get("last_expiry") == expiry.isoformat():
@@ -544,6 +571,8 @@ class Bot:
         if not ok and not preview_only:
             return
         c, spot, why = self.find_setup(expiry)
+        if spot and not preview_only and not self.market_live(spot):
+            return
         if not c:
             if preview_only:
                 self.tg.send(f"🔎 Preview: setup नाही — {why}")
@@ -576,7 +605,46 @@ class Bot:
             self.tg.send(msg)
             return
         self.tg.send(msg + f"\n{'⚡ LIVE' if C.LIVE else '🧪 DRY'} entry सुरू…")
-        self.enter(c, sets, expiry, exd)
+        self.safe_enter(c, sets, expiry, exd)
+
+    def safe_enter(self, c, sets, expiry, exd):
+        """[V1.3] entry मध्ये कोणताही error आला तरी Dhan वरील भरलेले legs बंद करतो."""
+        try:
+            self.enter(c, sets, expiry, exd)
+        except Exception as e:
+            log.exception("entry")
+            self.tg.send(f"❌ Entry मध्ये error: {str(e)[:250]}\nDhan वरील भरलेले legs तपासून बंद करतो…")
+            if self.s.get("status") != "OPEN":
+                self.reconcile_unwind([c["sec1"], c["sec2"], c["sec3"]])
+        finally:
+            if self.s.get("status") != "OPEN":
+                self.entry_block_until = time.time() + C.ENTRY_FAIL_COOLDOWN_MIN * 60
+                self.tg.send(f"⏳ Entry झाली नाही — {C.ENTRY_FAIL_COOLDOWN_MIN} मिनिटे नवीन प्रयत्न नाही.")
+
+    def reconcile_unwind(self, secs):
+        """[V1.3] Dhan positions मधून या strikes चे उघडे qty शोधून बंद करतो."""
+        try:
+            pos = self.d.positions()
+        except Exception as e:
+            self.tg.send(f"🚨 Positions वाचता आले नाहीत ({e}). Dhan app मध्ये लगेच हाताने तपासा!")
+            return
+        left = []
+        for p in pos:
+            sid = str(p.get("securityId"))
+            q = int(p.get("netQty", 0) or 0)
+            if sid in secs and q != 0:
+                side = "SELL" if q > 0 else "BUY"
+                try:
+                    got, _ = self.exec_leg(sid, side, abs(q), "FIX")
+                except Exception as e:
+                    got = 0
+                    log.error("fix %s: %s", sid, e)
+                if got < abs(q):
+                    left.append(f"{p.get('tradingSymbol', sid)} {q}")
+        if left:
+            self.tg.send("🚨 हे positions अजून उघडे आहेत — Dhan मध्ये हाताने बंद करा: " + ", ".join(left))
+        else:
+            self.tg.send("✅ Dhan वर या strikes चे कोणतेही उघडे position नाही.")
 
     def enter(self, c, sets, expiry, exd):
         lot = C.LOT_SIZE
@@ -621,7 +689,12 @@ class Bot:
         units = sum(l["qty"] for l in done)
         tp_net = C.TP_NET_PCT / 100 * deployed
         exit_cost_est = C.SLIPPAGE_RS * units + charges(buy_t, sell_t, 3 * n_slices(3 * lot * sets))
-        if C.SL_MODE == "SYMMETRIC":
+        if C.TARGET_MODE == "GROSS":
+            # [V1.3] MTM ±1.1% — monitor net शी तुलना करतो, म्हणून खर्च आत धरून रूपांतर
+            costs = entry_ch + exit_cost_est
+            tp_net = C.TP_GROSS_PCT / 100 * deployed - costs
+            sl_net = C.SL_GROSS_PCT / 100 * deployed + costs
+        elif C.SL_MODE == "SYMMETRIC":
             # [V1.1] MTM मध्ये target जेवढा दूर तेवढाच SL: net SL = net TP + 2 × (charges + slippage)
             sl_net = tp_net + 2 * (entry_ch + exit_cost_est)
         else:
@@ -696,10 +769,12 @@ class Bot:
             self.tg.send(f"📊 Status: MTM {inr(m)} | Net (खर्च वजा) {inr(net)} | "
                          f"TP {inr(tr['tp_net'])} / SL {inr(-tr['sl_net'])} | Exit {exd:%d-%b}")
         if reason:
-            self.exit_trade(reason, net)
+            self.exit_trade(reason, net, m)
 
-    def exit_trade(self, reason, est_net):
+    def exit_trade(self, reason, est_net, mtm_at=None):
         tr = self.s["trade"]
+        if mtm_at is not None and "mtm_at_trigger" not in tr:
+            tr["mtm_at_trigger"] = round(mtm_at, 2)
         if not tr.get("exiting"):
             self.tg.send(f"{reason} — exit सुरू (अंदाजे net {inr(est_net)})")
         tr["exiting"] = True
@@ -732,7 +807,12 @@ class Bot:
         exit_ch = charges(ex_buy, ex_sell, self.n_orders + tr.get("exit_orders", 0))
         net = pnl - tr["entry_charges"] - exit_ch
         pct = net / tr["deployed"] * 100 if tr["deployed"] else 0
-        self.tg.send(f"🏁 EXIT पूर्ण: {reason}\nGross {inr(pnl)} | Charges {inr(tr['entry_charges'] + exit_ch)}\n"
+        mt = tr.get("mtm_at_trigger")
+        slip = (mt - pnl) if mt is not None else 0.0
+        tr["slip"] = round(slip, 2)
+        slip_txt = (f"\n📉 Slippage: trigger वेळी MTM {inr(mt)} → प्रत्यक्ष {inr(pnl)} = {inr(slip)} "
+                    f"(₹{slip / max(tr.get('units', 1), 1):.2f}/unit)") if mt is not None else ""
+        self.tg.send(f"🏁 EXIT पूर्ण: {reason}{slip_txt}\nGross {inr(pnl)} | Charges {inr(tr['entry_charges'] + exit_ch)}\n"
                      f"NET {inr(net)} ({pct:+.2f}% of {inr(tr['deployed'])})\n"
                      f"Trade मधील कमाल net {inr(tr.get('peak', 0))} / किमान {inr(tr.get('low', 0))}")
         self._journal(tr, reason, pnl, exit_ch, net)
@@ -745,10 +825,10 @@ class Bot:
         new = not os.path.exists(p)
         with open(p, "a", encoding="utf-8") as f:
             if new:
-                f.write("entry_time,exit_time,expiry,sets,strikes,net_entry_pts,deployed,gross,charges,net,reason\n")
+                f.write("entry_time,exit_time,expiry,sets,strikes,net_entry_pts,deployed,mtm_at_trigger,gross,slippage,charges,net,reason\n")
             ks = "/".join(str(l["strike"]) for l in sorted(tr.get("legs_orig", tr["legs"]), key=lambda x: x["strike"]))
             f.write(f"{tr['entry_time']},{now().isoformat(timespec='seconds')},{tr['expiry']},{tr['sets']},"
-                    f"{ks},{tr['net_entry_pts']},{tr['deployed']},{gross:.2f},"
+                    f"{ks},{tr['net_entry_pts']},{tr['deployed']},{tr.get('mtm_at_trigger', '')},{gross:.2f},{tr.get('slip', '')},"
                     f"{tr['entry_charges'] + exit_ch:.2f},{net:.2f},{reason}\n")
 
     # ---------- Telegram commands ----------
