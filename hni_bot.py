@@ -1,5 +1,5 @@
 # =====================================================================
-#  WEEKLY HNI BOT  —  hni_bot.py   (V1.4)
+#  WEEKLY HNI BOT  —  hni_bot.py   (V1.5)
 #  NIFTY 1:3:2 Call Ratio | सतत setup तपासणी | दुसरी expiry
 #  Exit: Net TP 1% / Net SL 1% / expiry च्या 4 दिवस आधी 15:15
 # =====================================================================
@@ -307,8 +307,12 @@ def charges(buy_turn, sell_turn, n_orders):
     gst = (brok + txn + sebi) * C.GST_RATE
     return brok + stt + txn + sebi + stamp + gst
 
+def max_slice():
+    """[V1.5] एका order ची कमाल qty — नेहमी lot च्या पटीत (1800 → 27 lots = 1755)."""
+    return max(C.LOT_SIZE, (C.FREEZE_QTY // C.LOT_SIZE) * C.LOT_SIZE)
+
 def n_slices(qty):
-    return max(1, math.ceil(qty / C.FREEZE_QTY))
+    return max(1, math.ceil(qty / max_slice()))
 
 
 # ---------------------------------------------------------------------
@@ -456,7 +460,7 @@ class Bot:
         filled, value = 0, 0.0
         remaining = qty
         while remaining > 0:
-            part = min(remaining, C.FREEZE_QTY)
+            part = min(remaining, max_slice())
             got, val = self._exec_slice(sec, side, part, label)
             filled += got
             value += val
@@ -654,7 +658,7 @@ class Bot:
         except Exception as e:
             self.tg.send(f"🚨 Positions वाचता आले नाहीत ({e}). Dhan app मध्ये लगेच हाताने तपासा!")
             return
-        left = []
+        left, closed = [], []
         for p in pos:
             sid = str(p.get("securityId"))
             q = int(p.get("netQty", 0) or 0)
@@ -667,10 +671,13 @@ class Bot:
                     log.error("fix %s: %s", sid, e)
                 if got < abs(q):
                     left.append(f"{p.get('tradingSymbol', sid)} {q}")
+                else:
+                    closed.append(f"{p.get('tradingSymbol', sid)} {q:+d}")
         if left:
             self.tg.send("🚨 हे positions अजून उघडे आहेत — Dhan मध्ये हाताने बंद करा: " + ", ".join(left))
         else:
-            self.tg.send("✅ Dhan वर या strikes चे कोणतेही उघडे position नाही.")
+            extra = ("\nआपोआप बंद केलेले legs: " + ", ".join(closed)) if closed else ""
+            self.tg.send("✅ Dhan वर या strikes चे कोणतेही उघडे position नाही." + extra)
 
     def enter(self, c, sets, expiry, exd):
         lot = C.LOT_SIZE
@@ -679,6 +686,9 @@ class Bot:
             {"name": "L3", "strike": c["k3"], "sec": c["sec3"], "side": "BUY",  "qty": 2 * lot * sets},
             {"name": "L2", "strike": c["k2"], "sec": c["sec2"], "side": "SELL", "qty": 3 * lot * sets},
         ]                                   # क्रम: आधी BUY, मग SELL
+        for lg in legs:                      # [V1.5] qty lot च्या पटीत आहे याची खात्री
+            if lg["qty"] <= 0 or lg["qty"] % lot != 0:
+                raise DhanError(f"चुकीची qty {lg['qty']} ({lg['name']}) — lot {lot} च्या पटीत नाही")
         try:
             _, used_before = self.d.funds()
         except Exception:
