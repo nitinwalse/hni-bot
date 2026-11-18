@@ -1,5 +1,5 @@
 # =====================================================================
-#  WEEKLY HNI BOT  —  hni_bot.py   (V1.5)
+#  WEEKLY HNI BOT  —  hni_bot.py   (V1.7)
 #  NIFTY 1:3:2 Call Ratio | सतत setup तपासणी | दुसरी expiry
 #  Exit: Net TP 1% / Net SL 1% / expiry च्या 4 दिवस आधी 15:15
 # =====================================================================
@@ -50,8 +50,15 @@ def is_trading_day(d):
 def market_open(t):
     return is_trading_day(t.date()) and hm("09:15") <= t.time() <= hm("15:30")
 
+def exit_time_str():
+    """[V1.7] time-exit ची वेळ (पद्धतीनुसार)."""
+    return C.EXPIRY_MORNING_EXIT_TIME if C.EXIT_MODE == "EXPIRY_MORNING" else C.EXIT_TIME
+
 def exit_date_for(expiry):
-    """expiry च्या 4 कॅलेंडर दिवस आधी; तो trading दिवस नसेल तर आधीचा trading दिवस."""
+    """DAYS_BEFORE: expiry च्या N कॅलेंडर दिवस आधी (trading दिवस नसेल तर आधीचा).
+    EXPIRY_MORNING: expiry चाच दिवस."""
+    if C.EXIT_MODE == "EXPIRY_MORNING":
+        return expiry
     d = expiry - dt.timedelta(days=C.EXIT_DAYS_BEFORE_EXPIRY)
     while not is_trading_day(d):
         d -= dt.timedelta(days=1)
@@ -450,9 +457,11 @@ class Bot:
     # ---------- expiry ----------
     def target_expiry(self, today):
         ex = [e for e in self.d.expiries() if e >= today]
-        if len(ex) < 2:
-            return None
-        return ex[1]                      # चालू सोडून दुसरी
+        # [V1.7] चालू expiry (ex[0]) सोडायची; त्यानंतरची पहिली अशी expiry जिला किमान MIN_ENTRY_DTE दिवस उरलेत
+        for e in ex[1:]:
+            if (e - today).days >= C.MIN_ENTRY_DTE:
+                return e
+        return None
 
     # ---------- order execute (chase) ----------
     def exec_leg(self, sec, side, qty, label):
@@ -532,7 +541,10 @@ class Bot:
             avail, _ = self.d.funds()
             fit = int(avail // m_set)
             if fit < sets:
-                self.tg.send_throttled("fund", f"⚠️ उपलब्ध fund {inr(avail)} मध्ये फक्त {fit} sets बसतात (दिलेले {sets})")
+                if self.s.get("status") == "OPEN":
+                    log.info("preview: चालू trade margin वापरत आहे")
+                else:
+                    self.tg.send_throttled("fund", f"⚠️ उपलब्ध fund {inr(avail)} मध्ये फक्त {fit} sets बसतात (दिलेले {sets})")
                 sets = fit
         except Exception as e:
             log.warning("fundlimit: %s", e)
@@ -615,18 +627,21 @@ class Bot:
         q1, q2, q3 = lot * sets, 3 * lot * sets, 2 * lot * sets
         kind = "Credit" if c["net"] >= 0 else "Debit"
         msg = (f"{'🔎 PREVIEW' if preview_only else '🟢 SETUP मिळाला'}\n"
-               f"Spot {spot:.1f} → base {c['base']} | Expiry {expiry:%d-%b-%Y} | Exit {exd:%d-%b} {C.EXIT_TIME}\n"
+               f"Spot {spot:.1f} → base {c['base']} | Expiry {expiry:%d-%b-%Y} | Exit {exd:%d-%b} {exit_time_str()}\n"
                f"BUY {c['k1']} CE ×{sets} lot @~{c['p1']}\n"
                f"SELL {c['k2']} CE ×{3*sets} lot @~{c['p2']}\n"
                f"BUY {c['k3']} CE ×{2*sets} lot @~{c['p3']}\n"
                f"OTM {c['otm'][0]}/{c['otm'][1]}/{c['otm'][2]} | {kind} {abs(c['net']):.2f} pts = {abs(c['pct']):.2f}%\n"
                f"Margin/set {inr(c['m_set'])} ({c['m_src']}) | Sets {sets} | Deployed ~{inr(c['m_set']*sets)}\n"
                f"Gap-up तोटा {c['loss_pts']} pts/set | कमाल नफा {c['maxp']} pts/set")
+        if preview_only and self.s.get("status") == "OPEN":
+            msg += (f"\nℹ️ एक trade चालू आहे, त्याचे margin वापरात आहे — म्हणून इथे sets कमी दिसतात."
+                    f" हा फक्त preview; नवीन trade चालू trade बंद झाल्यावरच ({self.s.get('sets')} sets).")
         if preview_only or sets < 1:
             if sets < 1:
                 if not self.s.get("sets"):
                     msg += (f"\n❓ Sets ठरलेले नाहीत. 10 लाखात ~{int(C.CAPITAL // c['m_set'])} sets बसतात.\n"
-                            f"Telegram वर पाठवा: /sets <संख्या>   (उदा. /sets 20)")
+                            f"Telegram वर पाठवा: /sets <संख्या>   (उदा. /sets 10)")
                     if not preview_only:
                         self.tg.send_throttled("asksets", msg, 1800)
                         return
@@ -756,7 +771,7 @@ class Bot:
             f"Deployed {inr(deployed)}\n"
             f"🎯 Net TP {inr(tp_net)} → MTM trigger +{inr(tp_net + entry_ch + exit_cost_est)}\n"
             f"🛑 Net SL {inr(-sl_net)} → MTM trigger {inr(-(sl_net - entry_ch - exit_cost_est))}\n"
-            f"⏰ Time exit {exd:%d-%b} {C.EXIT_TIME}")
+            f"⏰ Time exit {exd:%d-%b} {exit_time_str()}")
 
     def unwind(self, legs):
         for lg in legs:
@@ -792,20 +807,39 @@ class Bot:
         net = m - tr["entry_charges"] - tr["exit_cost_est"]
         tr["peak"] = max(tr.get("peak", 0.0), net)
         tr["low"] = min(tr.get("low", 0.0), net)
-        exd = dt.date.fromisoformat(tr["exit_date"])
+        # [V1.7] exit तारीख नेहमी सध्याच्या config वरून — चालू trade लाही नवीन पद्धत लागू
+        exd = exit_date_for(dt.date.fromisoformat(tr["expiry"]))
+        if tr.get("exit_date") != exd.isoformat():
+            old = tr.get("exit_date")
+            tr["exit_date"] = exd.isoformat()
+            save_state(self.s)
+            self.tg.send(f"🔄 चालू trade ची time-exit बदलली: {old} → {exd:%d-%b} {exit_time_str()} ({C.EXIT_MODE})")
         reason = None
         if net >= tr["tp_net"]:
             reason = "🎯 TARGET"
         elif net <= -tr["sl_net"]:
             reason = "🛑 SL"
-        elif t.date() > exd or (t.date() == exd and t.time() >= hm(C.EXIT_TIME)):
+        elif t.date() > exd or (t.date() == exd and t.time() >= hm(exit_time_str())):
             reason = "⏰ TIME EXIT"
         if time.time() - self.last_status >= C.STATUS_EVERY_MIN * 60:
             self.last_status = time.time()
-            self.tg.send(f"📊 Status: MTM {inr(m)} | Net (खर्च वजा) {inr(net)} | "
-                         f"TP {inr(tr['tp_net'])} / SL {inr(-tr['sl_net'])} | Exit {exd:%d-%b}")
+            self.tg.send(self.status_text(tr, m))
         if reason:
             self.exit_trade(reason, net, m)
+
+    def status_text(self, tr, m):
+        """[V1.6] MTM trigger (+/−) थेट दाखवतो — net आकड्यांचा गोंधळ टाळण्यासाठी."""
+        costs = tr["entry_charges"] + tr["exit_cost_est"]
+        tp_mtm = tr["tp_net"] + costs
+        sl_mtm = tr["sl_net"] - costs
+        dep = tr["deployed"]
+        lot = C.LOT_SIZE
+        sets = tr["sets"]
+        net = m - costs
+        return (f"📊 {tr['sets']} sets = BUY {sets} + SELL {3*sets} + BUY {2*sets} lots | Expiry {tr['expiry']} | Exit {tr['exit_date']} {exit_time_str()}\n"
+                f"MTM आत्ता {inr(m)} ({m / dep * 100:+.2f}%)\n"
+                f"🎯 Target: MTM +{inr(tp_mtm)} ({tp_mtm / dep * 100:.2f}%) | 🛑 SL: MTM −{inr(sl_mtm)} ({sl_mtm / dep * 100:.2f}%)\n"
+                f"Deployed {inr(dep)} | अंदाजे खर्च {inr(costs)} → exit केले तर हातात ≈ {inr(net)}")
 
     def exit_trade(self, reason, est_net, mtm_at=None):
         tr = self.s["trade"]
@@ -877,9 +911,7 @@ class Bot:
                 tr = self.s.get("trade")
                 if self.s["status"] == "OPEN" and tr:
                     m = self.mtm()
-                    net = (m or 0) - tr["entry_charges"] - tr["exit_cost_est"]
-                    self.tg.send(f"📊 OPEN {tr['sets']} sets | MTM {inr(m or 0)} | Net {inr(net)} | "
-                                 f"TP {inr(tr['tp_net'])} SL {inr(-tr['sl_net'])} | Exit {tr['exit_date']}")
+                    self.tg.send(self.status_text(tr, m or 0))
                 else:
                     self.tg.send(f"FLAT | paused={self.s.get('paused')} | last expiry {self.s.get('last_expiry')}")
             elif c[0] == "/pause":
@@ -901,9 +933,13 @@ class Bot:
                 if len(c) > 1 and c[1].isdigit():
                     self.s["sets"] = int(c[1])
                     save_state(self.s)
-                    self.tg.send(f"✅ Sets = {c[1]} (1:3:2 × {c[1]}). पुढच्या setup पासून लागू.")
+                    n = int(c[1])
+                    self.tg.send(f"✅ Sets = {n} → BUY {n} + SELL {3*n} + BUY {2*n} lots. पुढच्या setup पासून लागू.")
                 else:
-                    self.tg.send(f"सध्याचे sets: {self.s.get('sets') or 'ठरलेले नाहीत'}. बदलायला: /sets 20")
+                    n = self.s.get('sets')
+                    self.tg.send(f"सध्याचे sets: {n or 'ठरलेले नाहीत'}"
+                                 + (f" = BUY {n} + SELL {3*n} + BUY {2*n} lots" if n else "")
+                                 + "\nबदलायचे असतील तरच: /sets <संख्या> (उदा. /sets 10)")
             elif c[0] == "/settings":
                 self.tg.send(self.settings_text())
             elif c[0] in ("/help", "/start", "/commands"):
@@ -923,8 +959,10 @@ class Bot:
                 f"Filter: Credit ≤{C.CREDIT_MAX_PCT}% / Debit ≤{C.DEBIT_MAX_PCT}%\n"
                 f"{tpsl} | Slippage गृहीत ₹{C.SLIPPAGE_RS}/unit\n"
                 f"Entry: {C.SCAN_START}–{C.SCAN_END}, दर {C.SCAN_EVERY_SEC} सेकंद | Expiry: दुसरी\n"
-                f"Exit: expiry च्या {C.EXIT_DAYS_BEFORE_EXPIRY} दिवस आधी {C.EXIT_TIME}\n"
-                f"Re-entry: exit नंतर {C.REENTRY_GAP_SEC} सेकंद | फसल्यास {C.ENTRY_FAIL_COOLDOWN_MIN} मिनिटे थांबणे\n"
+                + (f"Exit: expiry च्या दिवशी {C.EXPIRY_MORNING_EXIT_TIME}\n" if C.EXIT_MODE == "EXPIRY_MORNING"
+                   else f"Exit: expiry च्या {C.EXIT_DAYS_BEFORE_EXPIRY} दिवस आधी {C.EXIT_TIME}\n")
+                + f"Entry: किमान {C.MIN_ENTRY_DTE} DTE असलेली expiry (चालू सोडून)\n"
+                + f"Re-entry: exit नंतर {C.REENTRY_GAP_SEC} सेकंद | फसल्यास {C.ENTRY_FAIL_COOLDOWN_MIN} मिनिटे थांबणे\n"
                 f"Token: रोज {C.TOKEN_REFRESH_TIME} (आज: {self.token_day or '—'})")
 
     # ---------- main loop ----------

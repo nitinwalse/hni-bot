@@ -20,7 +20,7 @@ def _load_env(path=".env"):
 
 _load_env()
 
-VERSION = "V1.5"
+VERSION = "V1.7"
 
 # ---------- Keys (.env मधून) ----------
 DHAN_CLIENT_ID    = os.getenv("DHAN_CLIENT_ID", "")
@@ -71,7 +71,13 @@ SLIPPAGE_RS  = 0.5          # exit वेळी प्रत्येक unit �
 # ---------- वेळा (IST) ----------
 SCAN_START   = "09:45"      # setup तपासणी सुरू
 SCAN_END     = "15:00"      # यानंतर नवीन entry नाही
-EXIT_TIME    = "15:15"      # time-exit दिवशी या वेळी exit
+# [V1.7] Exit पद्धत — एकच ओळ बदलून निवडा:
+#   "DAYS_BEFORE"    = expiry च्या EXIT_DAYS_BEFORE_EXPIRY दिवस आधी EXIT_TIME ला (सुरक्षित, video प्रमाणे)
+#   "EXPIRY_MORNING" = expiry च्या दिवशीच सकाळी EXPIRY_MORNING_EXIT_TIME ला
+EXIT_MODE    = "DAYS_BEFORE"
+EXPIRY_MORNING_EXIT_TIME = "09:30"
+MIN_ENTRY_DTE = 7           # [V1.7] entry वेळी निवडलेल्या expiry ला किमान इतके कॅलेंडर दिवस उरलेले हवेत
+EXIT_TIME    = "15:15"      # DAYS_BEFORE पद्धतीत time-exit ची वेळ
 EXIT_DAYS_BEFORE_EXPIRY = 4 # expiry च्या 4 कॅलेंडर दिवस आधी (सुट्टी/शनिवार-रविवार असल्यास आधीचा trading दिवस)
 SCAN_EVERY_SEC    = 60      # setup किती सेकंदांनी तपासायचा
 MONITOR_EVERY_SEC = 5       # trade चालू असताना P&L किती सेकंदांनी
